@@ -1,0 +1,17 @@
+{
+  "name": "connecteng-server",
+  "version": "1.0.0",
+  "description": "Backend for ConnectENG App",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "agora-access-token": "^2.0.4",
+    "express": "^4.19.2",
+    "socket.io": "^2.4.1"
+  }
+}
