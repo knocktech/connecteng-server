@@ -18,7 +18,7 @@ io.on('connection', (socket) => {
 
     socket.on('find_match', () => {
         console.log(`--- 'find_match' event received from userId: ${userId} ---`);
-
+        
         if (!waitingUsers.some(user => user.userId === userId)) {
             waitingUsers.push({ id: socket.id, userId: userId });
             console.log(`User ${userId} ADDED to queue.`);
@@ -58,7 +58,26 @@ io.on('connection', (socket) => {
 });
 
 app.get('/agora/token', (req, res) => {
-    // ... (This part is unchanged and correct)
+    const channelName = req.query.channelName;
+    const uid = parseInt(req.query.uid) || 0;
+    const role = RtcRole.PUBLISHER;
+    const expireTime = 3600; // 1 hour
+    const currentTime = Math.floor(Date.now() / 1000);
+    const privilegeExpireTime = currentTime + expireTime;
+
+    if (!channelName || !AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
+        return res.status(400).json({ 'error': 'channelName, appId, and certificate are required' });
+    }
+
+    const token = RtcTokenBuilder.buildTokenWithUid(
+        AGORA_APP_ID,
+        AGORA_APP_CERTIFICATE,
+        channelName,
+        uid,
+        role,
+        privilegeExpireTime
+    );
+    return res.json({ 'token': token });
 });
 
 const PORT = process.env.PORT || 3000;

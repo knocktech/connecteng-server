@@ -10,8 +10,8 @@
     "node": "18.x"
   },
   "dependencies": {
-    "agora-access-token": "^2.0.4",
-    "express": "^4.19.2",
-    "socket.io": "^2.4.1"
+    "agora-access-token": "2.0.4",
+    "express": "4.19.2",
+    "socket.io": "2.4.1"
   }
 }
