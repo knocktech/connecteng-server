@@ -5,7 +5,12 @@ const { RtcTokenBuilder, RtcRole } = require('agora-token');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server);
+const io = socketIo(server, {
+  cors: {
+    origin: "*",  // Allow connections from any origin
+    methods: ["GET", "POST"]
+  }
+});
 
 const AGORA_APP_ID = process.env.AGORA_APP_ID;
 const AGORA_PRIMARY_CERTIFICATE = process.env.AGORA_PRIMARY_CERTIFICATE;
