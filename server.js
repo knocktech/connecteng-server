@@ -1,14 +1,14 @@
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
-const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
+const { RtcTokenBuilder, RtcRole } = require('agora-token');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
 const AGORA_APP_ID = process.env.AGORA_APP_ID;
-const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE;
+const AGORA_PRIMARY_CERTIFICATE = process.env.AGORA_PRIMARY_CERTIFICATE;
 
 let waitingUsers = [];
 
@@ -65,18 +65,18 @@ app.get('/agora/token', (req, res) => {
     const currentTime = Math.floor(Date.now() / 1000);
     const privilegeExpireTime = currentTime + expireTime;
 
-    if (!channelName || !AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
+    if (!channelName || !AGORA_APP_ID || !AGORA_PRIMARY_CERTIFICATE) {
         return res.status(400).json({ 'error': 'channelName, appId, and certificate are required' });
     }
 
     const token = RtcTokenBuilder.buildTokenWithUid(
-        AGORA_APP_ID,
-        AGORA_APP_CERTIFICATE,
-        channelName,
-        uid,
-        role,
-        privilegeExpireTime
-    );
+    AGORA_APP_ID,
+    AGORA_PRIMARY_CERTIFICATE, // <-- Change it to this
+    channelName,
+    uid,
+    role,
+    privilegeExpireTime
+);
     return res.json({ 'token': token });
 });
 
