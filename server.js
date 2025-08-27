@@ -2,12 +2,26 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const { RtcTokenBuilder, RtcRole } = require('agora-token');
+const admin = require('firebase-admin');
+
+// --- INITIALIZE FIREBASE ADMIN SDK ---
+// This will securely read the secret file you uploaded to Render
+try {
+    const serviceAccount = require('./firebase-credentials.json');
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+    });
+    console.log("Firebase Admin SDK initialized successfully.");
+} catch (error) {
+    console.error("Firebase Admin SDK initialization failed:", error);
+}
+// ------------------------------------
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "*",  // Allow connections from any origin
+    origin: "*",
     methods: ["GET", "POST"]
   }
 });
@@ -40,6 +54,24 @@ io.on('connection', (socket) => {
             const user2 = waitingUsers.shift();
             
             const channelName = `channel_${Date.now()}`;
+
+            // --- NEW: SAVE CALL RECORD TO FIRESTORE ---
+            if (admin.apps.length > 0) { // Check if Firebase was initialized
+                const db = admin.firestore();
+                const callRecord = {
+                    participants: [user1.userId, user2.userId],
+                    channelName: channelName,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp()
+                };
+                db.collection('calls').add(callRecord)
+                    .then(docRef => {
+                        console.log(`SUCCESS: Call record saved to Firestore with ID: ${docRef.id}`);
+                    })
+                    .catch(error => {
+                        console.error("ERROR: Failed to save call record:", error);
+                    });
+            }
+            // ------------------------------------------
 
             io.to(user1.id).emit('match_found', { channelName: channelName, remoteUserId: user2.userId });
             io.to(user2.id).emit('match_found', { channelName: channelName, remoteUserId: user1.userId });
@@ -76,7 +108,7 @@ app.get('/agora/token', (req, res) => {
 
     const token = RtcTokenBuilder.buildTokenWithUid(
     AGORA_APP_ID,
-    AGORA_PRIMARY_CERTIFICATE, // <-- Change it to this
+    AGORA_PRIMARY_CERTIFICATE,
     channelName,
     uid,
     role,
