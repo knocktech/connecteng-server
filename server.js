@@ -5,7 +5,6 @@ const { RtcTokenBuilder, RtcRole } = require('agora-token');
 const admin = require('firebase-admin');
 
 // --- INITIALIZE FIREBASE ADMIN SDK ---
-// This will securely read the secret file you uploaded to Render
 try {
     const serviceAccount = require('./firebase-credentials.json');
     admin.initializeApp({
@@ -52,36 +51,53 @@ io.on('connection', (socket) => {
             console.log("MATCHING TWO USERS...");
             const user1 = waitingUsers.shift();
             const user2 = waitingUsers.shift();
-            
             const channelName = `channel_${Date.now()}`;
 
-            // --- NEW: SAVE CALL RECORD TO FIRESTORE ---
-            if (admin.apps.length > 0) { // Check if Firebase was initialized
-                const db = admin.firestore();
-                const callRecord = {
-                    participants: [user1.userId, user2.userId],
-                    channelName: channelName,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp()
-                };
-                db.collection('calls').add(callRecord)
-                    .then(docRef => {
-                        console.log(`SUCCESS: Call record saved to Firestore with ID: ${docRef.id}`);
-                    })
-                    .catch(error => {
-                        console.error("ERROR: Failed to save call record:", error);
-                    });
-            }
-            // ------------------------------------------
+            const callRecord = {
+                participants: [user1.userId, user2.userId],
+                channelName: channelName,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                durationInSeconds: null // Initialize duration as null
+            };
 
-            io.to(user1.id).emit('match_found', { channelName: channelName, remoteUserId: user2.userId });
-            io.to(user2.id).emit('match_found', { channelName: channelName, remoteUserId: user1.userId });
-            
-            console.log(`SUCCESS: Matched ${user1.userId} and ${user2.userId} in channel ${channelName}`);
-            console.log('Queue after match:', waitingUsers.map(u => u.userId));
+            const db = admin.firestore();
+            db.collection('calls').add(callRecord)
+                .then(docRef => {
+                    const callId = docRef.id;
+                    console.log(`SUCCESS: Call record created with ID: ${callId}`);
+
+                    // Send the match event WITH the new callId
+                    io.to(user1.id).emit('match_found', { channelName: channelName, remoteUserId: user2.userId, callId: callId });
+                    io.to(user2.id).emit('match_found', { channelName: channelName, remoteUserId: user1.userId, callId: callId });
+
+                    console.log(`SUCCESS: Matched ${user1.userId} and ${user2.userId} in channel ${channelName}`);
+                })
+                .catch(error => {
+                    console.error("ERROR: Failed to save initial call record:", error);
+                    // Still try to connect the users even if DB save fails
+                    io.to(user1.id).emit('match_found', { channelName: channelName, remoteUserId: user2.userId, callId: null });
+                    io.to(user2.id).emit('match_found', { channelName: channelName, remoteUserId: user1.userId, callId: null });
+                });
         } else {
             console.log('Not enough users to match. Waiting...');
         }
     });
+    
+    // --- NEW EVENT LISTENER FOR WHEN A CALL ENDS ---
+    socket.on('end_call', ({ callId, durationInSeconds }) => {
+        if (callId && durationInSeconds != null) {
+            console.log(`--- 'end_call' event received for callId: ${callId} with duration: ${durationInSeconds}s ---`);
+            const db = admin.firestore();
+            db.collection('calls').doc(callId).update({
+                durationInSeconds: durationInSeconds
+            }).then(() => {
+                console.log(`SUCCESS: Updated call ${callId} with duration.`);
+            }).catch(error => {
+                console.error(`ERROR: Failed to update call ${callId}:`, error);
+            });
+        }
+    });
+    // ---------------------------------------------
 
     socket.on('cancel_search', () => {
         waitingUsers = waitingUsers.filter(user => user.id !== socket.id);
@@ -98,22 +114,21 @@ app.get('/agora/token', (req, res) => {
     const channelName = req.query.channelName;
     const uid = parseInt(req.query.uid) || 0;
     const role = RtcRole.PUBLISHER;
-    const expireTime = 3600; // 1 hour
+    const expireTime = 3600;
     const currentTime = Math.floor(Date.now() / 1000);
     const privilegeExpireTime = currentTime + expireTime;
 
     if (!channelName || !AGORA_APP_ID || !AGORA_PRIMARY_CERTIFICATE) {
         return res.status(400).json({ 'error': 'channelName, appId, and certificate are required' });
     }
-
     const token = RtcTokenBuilder.buildTokenWithUid(
-    AGORA_APP_ID,
-    AGORA_PRIMARY_CERTIFICATE,
-    channelName,
-    uid,
-    role,
-    privilegeExpireTime
-);
+        AGORA_APP_ID,
+        AGORA_PRIMARY_CERTIFICATE,
+        channelName,
+        uid,
+        role,
+        privilegeExpireTime
+    );
     return res.json({ 'token': token });
 });
 
