@@ -44,9 +44,6 @@ io.on('connection', (socket) => {
             console.log(`User ${userId} was already in the queue.`);
         }
         
-        console.log(`Current queue size: ${waitingUsers.length}`);
-        console.log('Current queue contents:', waitingUsers.map(u => u.userId));
-
         if (waitingUsers.length >= 2) {
             console.log("MATCHING TWO USERS...");
             const user1 = waitingUsers.shift();
@@ -63,38 +60,47 @@ io.on('connection', (socket) => {
             const db = admin.firestore();
             db.collection('calls').add(callRecord)
                 .then(docRef => {
-                    const callId = docRef.id;
-                    console.log(`SUCCESS: Call record created with ID: ${callId}`);
-
-                    // Send the match event WITH the new callId
-                    io.to(user1.id).emit('match_found', { channelName: channelName, remoteUserId: user2.userId, callId: callId });
-                    io.to(user2.id).emit('match_found', { channelName: channelName, remoteUserId: user1.userId, callId: callId });
-
-                    console.log(`SUCCESS: Matched ${user1.userId} and ${user2.userId} in channel ${channelName}`);
+                    console.log(`SUCCESS: Call record saved to Firestore with ID: ${docRef.id}`);
                 })
                 .catch(error => {
-                    console.error("ERROR: Failed to save initial call record:", error);
-                    // Still try to connect the users even if DB save fails
-                    io.to(user1.id).emit('match_found', { channelName: channelName, remoteUserId: user2.userId, callId: null });
-                    io.to(user2.id).emit('match_found', { channelName: channelName, remoteUserId: user1.userId, callId: null });
+                    console.error("ERROR: Failed to save call record:", error);
                 });
+            
+            // The match_found event is now simpler, it does not send the callId
+            io.to(user1.id).emit('match_found', { channelName: channelName, remoteUserId: user2.userId });
+            io.to(user2.id).emit('match_found', { channelName: channelName, remoteUserId: user1.userId });
+            
+            console.log(`SUCCESS: Matched ${user1.userId} and ${user2.userId} in channel ${channelName}`);
+            console.log('Queue after match:', waitingUsers.map(u => u.userId));
         } else {
             console.log('Not enough users to match. Waiting...');
         }
     });
     
-    // --- NEW EVENT LISTENER FOR WHEN A CALL ENDS ---
-    socket.on('end_call', ({ callId, durationInSeconds }) => {
-        if (callId && durationInSeconds != null) {
-            console.log(`--- 'end_call' event received for callId: ${callId} with duration: ${durationInSeconds}s ---`);
+    // --- NEW, SMARTER EVENT LISTENER FOR WHEN A CALL ENDS ---
+    socket.on('end_call', async ({ durationInSeconds }) => {
+        if (userId && durationInSeconds != null) {
+            console.log(`--- 'end_call' event received from userId: ${userId} with duration: ${durationInSeconds}s ---`);
             const db = admin.firestore();
-            db.collection('calls').doc(callId).update({
-                durationInSeconds: durationInSeconds
-            }).then(() => {
-                console.log(`SUCCESS: Updated call ${callId} with duration.`);
-            }).catch(error => {
-                console.error(`ERROR: Failed to update call ${callId}:`, error);
-            });
+            try {
+                // Find the most recent call for this user that hasn't been updated yet
+                const querySnapshot = await db.collection('calls')
+                    .where('participants', 'array-contains', userId)
+                    .where('durationInSeconds', '==', null)
+                    .orderBy('createdAt', 'desc')
+                    .limit(1)
+                    .get();
+
+                if (!querySnapshot.empty) {
+                    const callDoc = querySnapshot.docs[0];
+                    await callDoc.ref.update({ durationInSeconds: durationInSeconds });
+                    console.log(`SUCCESS: Updated call ${callDoc.id} with duration.`);
+                } else {
+                    console.log(`WARNING: Could not find a matching open call to update for userId: ${userId}`);
+                }
+            } catch (error) {
+                console.error(`ERROR: Failed to update call for userId ${userId}:`, error);
+            }
         }
     });
     // ---------------------------------------------
@@ -111,6 +117,7 @@ io.on('connection', (socket) => {
 });
 
 app.get('/agora/token', (req, res) => {
+    // This function remains the same
     const channelName = req.query.channelName;
     const uid = parseInt(req.query.uid) || 0;
     const role = RtcRole.PUBLISHER;
