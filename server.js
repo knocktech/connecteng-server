@@ -29,61 +29,102 @@ const AGORA_APP_ID = process.env.AGORA_APP_ID;
 const AGORA_PRIMARY_CERTIFICATE = process.env.AGORA_PRIMARY_CERTIFICATE;
 
 let waitingUsers = [];
+const db = admin.firestore(); // Initialize Firestore instance
 
 io.on('connection', (socket) => {
     console.log(`A user connected: ${socket.id}`);
     const userId = socket.handshake.query.userId;
 
-    socket.on('find_match', () => {
-        console.log(`--- 'find_match' event received from userId: ${userId} ---`);
-        
-        if (!waitingUsers.some(user => user.userId === userId)) {
-            waitingUsers.push({ id: socket.id, userId: userId });
-            console.log(`User ${userId} ADDED to queue.`);
-        } else {
-            console.log(`User ${userId} was already in the queue.`);
-        }
-        
-        if (waitingUsers.length >= 2) {
-            console.log("MATCHING TWO USERS...");
-            const user1 = waitingUsers.shift();
-            const user2 = waitingUsers.shift();
-            const channelName = `channel_${Date.now()}`;
+    // --- UPDATED 'find_match' HANDLER WITH GENDER LOGIC ---
+    socket.on('find_match', async (data) => {
+        const genderPreference = data ? data.genderPreference : "Anyone";
+        console.log(`--- 'find_match' event from userId: ${userId} with preference: ${genderPreference} ---`);
 
-            const callRecord = {
-                participants: [user1.userId, user2.userId],
-                channelName: channelName,
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                durationInSeconds: null // Initialize duration as null
+        if (!userId) {
+            console.error("ERROR: find_match event received without a userId.");
+            return;
+        }
+
+        try {
+            // Step 1: Fetch the current user's (User A) profile to get their gender
+            const userADoc = await db.collection('users').doc(userId).get();
+            if (!userADoc.exists) {
+                console.error(`ERROR: User profile not found in Firestore for userId: ${userId}`);
+                return;
+            }
+            const userAData = userADoc.data();
+            const userAGender = userAData.gender;
+
+            const userA = {
+                id: socket.id,
+                userId: userId,
+                gender: userAGender,
+                genderPreference: genderPreference
             };
 
-            const db = admin.firestore();
-            db.collection('calls').add(callRecord)
-                .then(docRef => {
-                    console.log(`SUCCESS: Call record saved to Firestore with ID: ${docRef.id}`);
-                })
-                .catch(error => {
-                    console.error("ERROR: Failed to save call record:", error);
-                });
-            
-            // The match_found event is now simpler, it does not send the callId
-            io.to(user1.id).emit('match_found', { channelName: channelName, remoteUserId: user2.userId });
-            io.to(user2.id).emit('match_found', { channelName: channelName, remoteUserId: user1.userId });
-            
-            console.log(`SUCCESS: Matched ${user1.userId} and ${user2.userId} in channel ${channelName}`);
-            console.log('Queue after match:', waitingUsers.map(u => u.userId));
-        } else {
-            console.log('Not enough users to match. Waiting...');
+            // Step 2: Try to find a reciprocal match in the waiting queue
+            let matchedUser = null;
+            let matchIndex = -1;
+
+            for (let i = 0; i < waitingUsers.length; i++) {
+                const userB = waitingUsers[i];
+
+                // Check if User B matches User A's preference
+                const aLikesB = userA.genderPreference === 'Anyone' || userA.genderPreference === userB.gender;
+                // Check if User A matches User B's preference
+                const bLikesA = userB.genderPreference === 'Anyone' || userB.genderPreference === userA.gender;
+
+                if (aLikesB && bLikesA) {
+                    matchedUser = userB;
+                    matchIndex = i;
+                    break;
+                }
+            }
+
+            // Step 3: If a match is found, connect them. Otherwise, add to the queue.
+            if (matchedUser) {
+                // Remove the matched user from the queue
+                waitingUsers.splice(matchIndex, 1);
+
+                const channelName = `channel_${Date.now()}`;
+
+                // Create call record in Firestore
+                const callRecord = {
+                    participants: [userA.userId, matchedUser.userId],
+                    channelName: channelName,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    durationInSeconds: null
+                };
+
+                await db.collection('calls').add(callRecord);
+                console.log(`SUCCESS: Call record saved for ${userA.userId} and ${matchedUser.userId}`);
+
+                // Emit match_found to both users
+                io.to(userA.id).emit('match_found', { channelName: channelName, remoteUserId: matchedUser.userId });
+                io.to(matchedUser.id).emit('match_found', { channelName: channelName, remoteUserId: userA.userId });
+
+                console.log(`SUCCESS: Matched ${userA.userId} (${userA.gender}) with ${matchedUser.userId} (${matchedUser.gender})`);
+            } else {
+                // No match found, add User A to the queue if they aren't already there
+                if (!waitingUsers.some(user => user.userId === userA.userId)) {
+                    waitingUsers.push(userA);
+                    console.log(`User ${userA.userId} (${userA.gender}, pref: ${userA.genderPreference}) ADDED to queue. Waiting for a match.`);
+                } else {
+                    console.log(`User ${userA.userId} is already in the queue and waiting.`);
+                }
+            }
+            console.log('Current Queue:', waitingUsers.map(u => ({uid: u.userId, g: u.gender, p: u.genderPreference})));
+
+        } catch (error) {
+            console.error(`ERROR: An error occurred during find_match for userId: ${userId}`, error);
         }
     });
+    // --- END OF UPDATED HANDLER ---
     
-    // --- NEW, SMARTER EVENT LISTENER FOR WHEN A CALL ENDS ---
     socket.on('end_call', async ({ durationInSeconds }) => {
         if (userId && durationInSeconds != null) {
             console.log(`--- 'end_call' event received from userId: ${userId} with duration: ${durationInSeconds}s ---`);
-            const db = admin.firestore();
             try {
-                // Find the most recent call for this user that hasn't been updated yet
                 const querySnapshot = await db.collection('calls')
                     .where('participants', 'array-contains', userId)
                     .where('durationInSeconds', '==', null)
@@ -103,7 +144,6 @@ io.on('connection', (socket) => {
             }
         }
     });
-    // ---------------------------------------------
 
     socket.on('cancel_search', () => {
         waitingUsers = waitingUsers.filter(user => user.id !== socket.id);
@@ -117,7 +157,6 @@ io.on('connection', (socket) => {
 });
 
 app.get('/agora/token', (req, res) => {
-    // This function remains the same
     const channelName = req.query.channelName;
     const uid = parseInt(req.query.uid) || 0;
     const role = RtcRole.PUBLISHER;
