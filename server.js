@@ -31,7 +31,6 @@ const AGORA_APP_ID = process.env.AGORA_APP_ID;
 const AGORA_PRIMARY_CERTIFICATE = process.env.AGORA_PRIMARY_CERTIFICATE;
 
 let waitingUsers = [];
-// ✅ ADDED: Global map to track which userId belongs to which socket.id
 const userSocketMap = new Map(); 
 
 const db = admin.firestore(); // Initialize Firestore instance
@@ -40,38 +39,72 @@ io.on('connection', (socket) => {
     const userId = socket.handshake.query.userId;
     console.log(`A user connected: ${socket.id} (UID: ${userId})`);
 
-    // ✅ ADDED: Register user in the map upon connection
     if (userId) {
         userSocketMap.set(userId, socket.id);
     }
 
-    // --- ✅ NEW: DIRECT CALL SIGNALING HANDLERS ---
+    // --- DIRECT CALL SIGNALING HANDLERS ---
 
     /**
-     * Relays a call invitation from a caller to a specific recipient.
+     * Relays a call invitation via Socket AND FCM (for background wake-up).
      */
-    socket.on('send_call_invite', (data) => {
-        const { targetUserId, channelName, token, callerId, callerName } = data;
+    socket.on('send_call_invite', async (data) => {
+        // ✅ ADDED: 'targetUid' to destructuring so it passes through
+        const { targetUserId, channelName, token, callerId, callerName, targetUid } = data;
         console.log(`Direct Call: ${callerId} is inviting ${targetUserId} to ${channelName}`);
 
+        // 1. Try Socket (Fastest if app is open)
         const targetSocketId = userSocketMap.get(targetUserId);
         if (targetSocketId) {
-            // Forward the event to User B
             io.to(targetSocketId).emit('incoming_call', {
                 channelName,
                 token,
                 callerId,
-                callerName
+                callerName,
+                targetUid // ✅ Pass this to the receiver's socket
             });
             console.log(`Signal forwarded to recipient socket: ${targetSocketId}`);
         } else {
-            console.log(`Target user ${targetUserId} is currently offline.`);
+            console.log(`Target user ${targetUserId} is currently offline from Socket.`);
+        }
+
+        // 2. ✅ ADDED: ALWAYS Send FCM Notification (Wakes up killed apps)
+        try {
+            const userDoc = await db.collection('users').doc(targetUserId).get();
+            if (userDoc.exists) {
+                const userData = userDoc.data();
+                const fcmToken = userData.fcmToken;
+
+                if (fcmToken) {
+                    const message = {
+                        token: fcmToken,
+                        data: {
+                            type: 'call',
+                            channelName: String(channelName),
+                            token: String(token),
+                            callerId: String(callerId),
+                            callerName: String(callerName || "Unknown"),
+                            targetUid: String(targetUid || "0") // Pass targetUid to FCM too
+                        },
+                        android: {
+                            priority: 'high',
+                            ttl: 0 // 0 means "deliver immediately or drop if device completely unreachable"
+                        }
+                    };
+
+                    await admin.messaging().send(message);
+                    console.log(`FCM Wake-up Notification sent to ${targetUserId}`);
+                } else {
+                    console.log(`No FCM token found for user ${targetUserId}. Cannot send wake-up.`);
+                }
+            } else {
+                console.log(`User ${targetUserId} not found in Firestore.`);
+            }
+        } catch (error) {
+            console.error(`Failed to send FCM to ${targetUserId}:`, error);
         }
     });
 
-    /**
-     * Relays a rejection signal from the recipient back to the caller.
-     */
     socket.on('decline_call', (data) => {
         const { callerId } = data;
         console.log(`Call declined. Notifying caller: ${callerId}`);
@@ -182,7 +215,6 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         waitingUsers = waitingUsers.filter(user => user.id !== socket.id);
         
-        // ✅ ADDED: Remove user from map on disconnect
         if (userId) {
             userSocketMap.delete(userId);
         }
