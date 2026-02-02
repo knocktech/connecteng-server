@@ -33,8 +33,7 @@ const AGORA_PRIMARY_CERTIFICATE = process.env.AGORA_PRIMARY_CERTIFICATE;
 let waitingUsers = [];
 const userSocketMap = new Map(); 
 
-// ✅ NEW: Track active direct calls to handle cancellations
-// Key: CallerUserID, Value: TargetUserID
+// Track active direct calls: Key=CallerUserID, Value=TargetUserID
 const activeCalls = new Map();
 
 const db = admin.firestore();
@@ -77,12 +76,11 @@ io.on('connection', (socket) => {
     socket.on('send_call_invite', async (data) => {
         const { targetUserId, channelName, token, callerId, callerName, targetUid } = data;
         
-        // ✅ Track this call so we can cancel it if caller disconnects
+        // Track call for cancellation
         activeCalls.set(callerId, targetUserId);
 
         console.log(`Direct Call: ${callerId} -> ${targetUserId}`);
 
-        // 1. Try Socket
         const targetSocketId = userSocketMap.get(targetUserId);
         if (targetSocketId) {
             io.to(targetSocketId).emit('incoming_call', {
@@ -90,7 +88,7 @@ io.on('connection', (socket) => {
             });
         }
 
-        // 2. Always Send FCM (Wake up)
+        // Always Send FCM (Wake up)
         await sendFcmMessage(targetUserId, {
             type: 'call',
             channelName: String(channelName),
@@ -103,10 +101,7 @@ io.on('connection', (socket) => {
 
     socket.on('decline_call', (data) => {
         const { callerId } = data;
-        // Clean up tracking
-        // (If B declines, A is no longer calling B)
-        // We find who was calling 'userId' (which is B) logic is tricky here, 
-        // usually 'decline' comes from B. 'callerId' is A.
+        // Clean up tracking (B declined A, so A is no longer calling B)
         activeCalls.delete(callerId);
 
         const callerSocketId = userSocketMap.get(callerId);
@@ -116,17 +111,14 @@ io.on('connection', (socket) => {
     });
 
     socket.on('cancel_call', async (data) => {
-         // Explicit cancel from Caller UI
          const { targetUserId } = data;
-         activeCalls.delete(userId); // Caller is canceling
+         activeCalls.delete(userId); 
          
-         // Notify via Socket
          const targetSocketId = userSocketMap.get(targetUserId);
          if (targetSocketId) {
              io.to(targetSocketId).emit('call_ended');
          }
 
-         // Notify via FCM (Stop ringing)
          await sendFcmMessage(targetUserId, {
              type: 'cancel_call',
              callerId: String(userId)
@@ -169,7 +161,6 @@ io.on('connection', (socket) => {
                 waitingUsers.splice(matchIndex, 1);
                 const channelName = `channel_${Date.now()}`;
                 
-                // Save Call Record
                 await db.collection('calls').add({
                     participants: [userA.userId, matchedUser.userId],
                     channelName: channelName,
@@ -190,12 +181,25 @@ io.on('connection', (socket) => {
     });
 
     socket.on('end_call', async ({ durationInSeconds }) => {
-        // If a user ends the call, ensure we clean up any active "ringing" state
-        activeCalls.delete(userId);
-        
-        // Also, finding the partner to send a cancel might be needed if they never picked up?
-        // Usually 'end_call' means they were connected.
-        // But if they end it while it's ringing (cancel), we handled that above.
+        // ✅ FIXED: Check if this was an active ringing call and Cancel it if needed
+        if (activeCalls.has(userId)) {
+            const targetUserId = activeCalls.get(userId);
+            console.log(`User ${userId} ended ringing call to ${targetUserId}. Sending FCM Cancel.`);
+            
+            // Send FCM Cancel to stop the phone from ringing
+            await sendFcmMessage(targetUserId, {
+                type: 'cancel_call',
+                callerId: String(userId)
+            });
+            
+            // Notify Socket if available
+            const targetSocketId = userSocketMap.get(targetUserId);
+            if (targetSocketId) {
+                io.to(targetSocketId).emit('call_ended');
+            }
+
+            activeCalls.delete(userId);
+        }
 
         if (userId && durationInSeconds != null) {
             try {
@@ -223,18 +227,16 @@ io.on('connection', (socket) => {
     socket.on('disconnect', async () => {
         waitingUsers = waitingUsers.filter(user => user.id !== socket.id);
         
-        // ✅ CRITICAL FIX: If this user was calling someone, CANCEL IT.
+        // Handle disconnect during ringing
         if (userId && activeCalls.has(userId)) {
             const targetUserId = activeCalls.get(userId);
             console.log(`Caller ${userId} disconnected. Cancelling call to ${targetUserId}`);
             
-            // 1. Notify Socket (if target is open)
             const targetSocketId = userSocketMap.get(targetUserId);
             if (targetSocketId) {
                 io.to(targetSocketId).emit('call_ended');
             }
 
-            // 2. Notify FCM (Stop ringing if app is killed)
             await sendFcmMessage(targetUserId, {
                 type: 'cancel_call',
                 callerId: String(userId)
@@ -246,7 +248,6 @@ io.on('connection', (socket) => {
         if (userId) {
             userSocketMap.delete(userId);
         }
-        console.log(`Disconnected: ${userId}`);
     });
 });
 
